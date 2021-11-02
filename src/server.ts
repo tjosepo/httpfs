@@ -94,24 +94,21 @@ async function getRequest(conn: Deno.Conn): Promise<Request> {
 }
 
 function getReply(conn: Deno.Conn) {
-  async function reply(resource: Response): Promise<void>;
-  async function reply(resource: BodyInit, init?: ResponseInit): Promise<void>;
   async function reply(
-    resource: Response | BodyInit,
-    init?: ResponseInit
+    body: BodyInit | Response | null | undefined,
+    init?: ResponseInit | undefined
   ): Promise<void> {
-    if (!(resource instanceof Response))
-      return reply(new Response(resource, init));
+    if (!(body instanceof Response)) return reply(new Response(body, init));
 
-    let message = `HTTP/1.1 ${resource.status} ${resource.statusText}\r\n`;
-    message += Header.stringify(resource.headers);
+    let message = `HTTP/1.1 ${body.status} ${body.statusText}\r\n`;
+    message += Header.stringify(body.headers);
     message += "\r\n";
 
     const encoder = new TextEncoder();
     conn.write(encoder.encode(message));
 
-    if (resource.body) {
-      const reader = resource.body.getReader();
+    if (body.body) {
+      const reader = body.body.getReader();
       while (true) {
         const { value, done } = await reader.read();
         if (value) await conn.write(value);

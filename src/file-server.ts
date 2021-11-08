@@ -1,6 +1,6 @@
 import * as Http from "./server.ts";
 import { textPlain, textHtml } from "./content-types.ts";
-import { readableStreamFromReader, delay } from "./deps.ts";
+import { readableStreamFromReader, delay, ensureDir } from "./deps.ts";
 import { lookup } from "https://deno.land/x/media_types/mod.ts";
 
 export interface FileServerOptions {
@@ -93,7 +93,9 @@ export class FileServer {
     const { pathname } = new URL(request.url);
 
     try {
-      const file = await Deno.open(this.#directory + pathname, { read: true });
+      const file = await Deno.open(this.#directory + decodeURI(pathname), {
+        read: true,
+      });
       const stream = readableStreamFromReader(file);
 
       const stat = await file.stat();
@@ -166,7 +168,15 @@ export class FileServer {
     }
 
     const reader = body.getReader();
-    const file = await Deno.open(this.#directory + pathname, {
+
+    const filename = decodeURI(pathname)
+      .split("/")
+      .filter(Boolean)
+      .at(-1) as string;
+    const dir = decodeURI(pathname).substring(0, pathname.indexOf(filename));
+    await ensureDir(this.#directory + dir);
+
+    const file = await Deno.open(this.#directory + dir + filename, {
       create: true,
       write: true,
     });

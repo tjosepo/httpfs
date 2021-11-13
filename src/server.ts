@@ -61,7 +61,7 @@ async function getRequest(conn: Deno.Conn): Promise<Request> {
 
   let body: ReadableStream<Uint8Array> | undefined = undefined;
 
-  if (method === "POST") {
+  if (method === "POST" && contentLength > 0) {
     body = new ReadableStream<Uint8Array>({
       start(controller) {
         if (contentLength) {
@@ -72,15 +72,21 @@ async function getRequest(conn: Deno.Conn): Promise<Request> {
         }
       },
       async pull(controller) {
-        const bytes = new Uint8Array(bufferSize);
-        const numberOfBytesRead = await conn.read(bytes);
-        if (!numberOfBytesRead) {
+        try {
+          const bytes = new Uint8Array(bufferSize);
+          const numberOfBytesRead = await conn.read(bytes);
+          if (!numberOfBytesRead) {
+            controller.close();
+          } else {
+            const chunk = bytes.subarray(0, numberOfBytesRead);
+            contentBytesRead += bytes.length;
+            controller.enqueue(chunk);
+            if (contentBytesRead >= contentLength) controller.close();
+          }
+        } catch (e) {
+          console.error(e);
           controller.close();
-        } else {
-          const chunk = bytes.subarray(0, numberOfBytesRead);
-          contentBytesRead += bytes.length;
-          controller.enqueue(chunk);
-          if (contentBytesRead >= contentLength) controller.close();
+          conn.close();
         }
       },
     });
@@ -100,23 +106,27 @@ function getReply(conn: Deno.Conn) {
   ): Promise<void> {
     if (!(body instanceof Response)) return reply(new Response(body, init));
 
-    let message = `HTTP/1.1 ${body.status} ${body.statusText}\r\n`;
-    message += Header.stringify(body.headers);
-    message += "\r\n";
+    try {
+      let message = `HTTP/1.1 ${body.status} ${body.statusText}\r\n`;
+      message += Header.stringify(body.headers);
+      message += "\r\n";
 
-    const encoder = new TextEncoder();
-    conn.write(encoder.encode(message));
+      const encoder = new TextEncoder();
+      conn.write(encoder.encode(message));
 
-    if (body.body) {
-      const reader = body.body.getReader();
-      while (true) {
-        const { value, done } = await reader.read();
-        if (value) await conn.write(value);
-        if (done) break;
+      if (body.body) {
+        const reader = body.body.getReader();
+        while (true) {
+          const { value, done } = await reader.read();
+          if (value) await conn.write(value);
+          if (done) break;
+        }
       }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      conn.close();
     }
-
-    conn.close();
   }
 
   return reply;

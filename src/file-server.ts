@@ -1,5 +1,11 @@
 import * as Http from "./server.ts";
-import { textPlain, textHtml } from "./content-types.ts";
+import {
+  OkResponse,
+  BadRequestResponse,
+  NotFoundResponse,
+  InternalServerErrorResponse,
+} from "./responses.ts";
+import { textPlain, applicationJson, textHtml } from "./content-types.ts";
 import { readableStreamFromReader, delay, ensureDir } from "./deps.ts";
 import { lookup } from "https://deno.land/x/media_types/mod.ts";
 
@@ -25,65 +31,45 @@ export class FileServer {
   async listen() {
     const port = this.#port;
 
-    if (this.#verbose) console.log(`Listening on http://localhost:${port}/`);
+    console.log(`Listening on http://localhost:${port}/`);
 
     for await (const { request, reply } of Http.listen({ port })) {
       (async () => {
-        try {
+        const { pathname } = new URL(request.url);
+        const start = Date.now();
+        let response: Response | undefined = undefined;
+
+        if (this.#verbose) {
+          console.log(`Received ${request.method} ${pathname}`);
+        }
+
+        if (request.method === "GET") {
+          const release = await this.#getReadPermission(pathname);
+          response = await this.#getFile(request);
+          await reply(response);
+          release();
+        }
+
+        if (request.method === "POST") {
+          const release = await this.#getWritePermission(pathname);
+          response = await this.#writeFile(request);
+          await reply(response);
+          release();
+        }
+
+        if (!response) {
+          response = new InternalServerErrorResponse();
+          await reply(response);
+        }
+
+        const ms = Date.now() - start;
+        if (this.#verbose) {
           const { pathname } = new URL(request.url);
-          const start = Date.now();
-          let response: Response | undefined = undefined;
-
-          if (this.#verbose) {
-            console.log(`Received ${request.method} ${pathname}`);
-          }
-
-          try {
-            if (request.method === "GET") {
-              const release = await this.#getReadPermission(pathname);
-              try {
-                response = await this.#getFile(request);
-                await reply(response);
-                release();
-              } catch (e) {
-                release();
-              }
-            }
-
-            if (request.method === "POST") {
-              const release = await this.#getWritePermission(pathname);
-              try {
-                response = await this.#writeFile(request);
-                await reply(response);
-                release();
-              } catch (e) {
-                release();
-              }
-            }
-          } catch (e) {
-            console.error(e);
-            response = new Response("500 Unhandled exception", {
-              status: 500,
-            });
-            await reply(response);
-          }
-
-          if (!response) {
-            response = new Response("500 Unhandled exception", {
-              status: 500,
-            });
-            await reply(response);
-          }
-
-          const ms = Date.now() - start;
-          if (this.#verbose) {
-            const { pathname } = new URL(request.url);
-            console.log(
-              `Completed ${request.method} ${pathname} ${response.status} ${ms}ms`
-            );
-          }
-        } catch {
-          // Drop it
+          console.log(
+            `Completed ${request.method} ${pathname} ${
+              response!.status
+            } ${ms}ms`
+          );
         }
       })();
     }
@@ -91,9 +77,10 @@ export class FileServer {
 
   async #getFile(request: Request) {
     const { pathname } = new URL(request.url);
+    const filename = decodeURI(pathname);
 
     try {
-      const file = await Deno.open(this.#directory + decodeURI(pathname), {
+      const file = await Deno.open(this.#directory + filename, {
         read: true,
       });
       const stream = readableStreamFromReader(file);
@@ -107,6 +94,7 @@ export class FileServer {
 
       switch (type) {
         case "text/plain":
+        case "text/markdown":
         case "image/jpeg":
         case "image/gif":
         case "image/png":
@@ -123,7 +111,7 @@ export class FileServer {
     }
 
     try {
-      const entries = Deno.readDir(this.#directory + pathname);
+      const entries = Deno.readDir(this.#directory + filename);
       let directories = [];
       let files = [];
       for await (const { name, isDirectory, isFile } of entries) {
@@ -141,6 +129,9 @@ export class FileServer {
       if (accept === "text/html") {
         headers.set("Content-Type", "text/html");
         result = textHtml({ pathname, directories, files });
+      } else if (accept === "application/json") {
+        headers.set("Content-Type", "application/json");
+        result = applicationJson({ pathname, directories, files });
       } else {
         headers.set("Content-Type", "text/plain");
         result = textPlain({ pathname, directories, files });
@@ -153,47 +144,47 @@ export class FileServer {
       // Directory doesn't exist
     }
 
-    return new Response("404 Not found", {
-      status: 404,
-    });
+    return new NotFoundResponse();
   }
 
   async #writeFile(request: Request) {
     const { pathname } = new URL(request.url);
     const { body } = request;
 
-    if (!body) {
-      // Basic 200 OK
-      return new Response();
+    const filename = decodeURI(pathname).split("/").filter(Boolean).at(-1);
+
+    if (!filename) {
+      return new BadRequestResponse();
     }
 
-    const reader = body.getReader();
-
-    const filename = decodeURI(pathname)
-      .split("/")
-      .filter(Boolean)
-      .at(-1) as string;
     const dir = decodeURI(pathname).substring(0, pathname.indexOf(filename));
     await ensureDir(this.#directory + dir);
 
-    const file = await Deno.open(this.#directory + dir + filename, {
-      create: true,
-      write: true,
-    });
+    let file;
+    try {
+      file = await Deno.open(this.#directory + dir + filename, {
+        create: true,
+        write: true,
+      });
 
-    while (true) {
-      const { value, done } = await reader.read();
-      if (value) await file.write(value);
-      if (done) break;
+      if (!body) {
+        return new OkResponse(`Created file ${pathname}`);
+      }
+
+      const reader = body.getReader();
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (value) await file.write(value);
+        if (done) break;
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      file?.close();
     }
 
-    file.close();
-
-    const result = `Created file ${pathname}`;
-    const headers = new Headers();
-    headers.set("Content-Length", `${result.length}`);
-
-    return new Response(result, { headers });
+    return new OkResponse(`Created file ${pathname}`);
   }
 
   async #getWritePermission(filename: string) {

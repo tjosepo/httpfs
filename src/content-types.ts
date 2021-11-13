@@ -41,3 +41,17 @@ export function textHtml({ pathname, directories, files }: ContentTypeOptions) {
     </body>
   </html>`;
 }
+
+export function applicationJson({
+  pathname,
+  directories,
+  files,
+}: ContentTypeOptions) {
+  return JSON.stringify({
+    path: pathname,
+    entries: [
+      ...files.map((file) => ({ name: file, type: "file" })),
+      ...directories.map((dir) => ({ name: dir, type: "directory" })),
+    ],
+  });
+}
